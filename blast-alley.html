@@ -61,6 +61,14 @@ textarea{width:100%;height:70px;background:#08201e;border:1px solid var(--line);
   -webkit-user-select:text;user-select:text}
 .row{display:flex;gap:8px;width:100%}
 .row .btn{width:100%;justify-content:center;padding:12px;font-size:14px}
+.cam{width:min(280px,72vw);height:104px;border-radius:12px;overflow:hidden;background:#000;
+  border:1px solid var(--line);position:relative}
+.cam video{width:100%;height:100%;object-fit:cover}
+.camlbl{position:absolute;left:8px;bottom:6px;font-size:10px;letter-spacing:1.6px;
+  text-transform:uppercase;color:var(--gold-lt);text-shadow:0 1px 4px #000}
+details{width:100%}
+summary{color:var(--mut);font-size:12px;cursor:pointer;padding:4px 0;letter-spacing:.3px}
+details .row{margin-top:8px}
 .status{font-size:12.5px;color:var(--gold-lt);letter-spacing:.4px;text-align:center;min-height:16px}
 
 /* game */
@@ -121,15 +129,19 @@ canvas#cv{background:#08201e;border-radius:10px;image-rendering:pixelated;
 <!-- HOST -->
 <section class="screen" id="s-host">
   <div class="card">
-    <h2>Step 1 &mdash; show this code</h2>
+    <h2>Scan to join</h2>
     <div id="qrbox"></div>
     <p class="status" id="host-st">Building your invite...</p>
-    <textarea id="host-code" readonly></textarea>
-    <div class="row">
-      <button class="btn ghost" id="host-copy">Copy code</button>
-      <button class="btn gold" id="host-scan">Scan their reply</button>
-    </div>
-    <p class="hint">Let the other phone scan this. It gives you a reply code &mdash; scan that back and the match starts.</p>
+    <div class="cam" id="host-cam"><video id="hv" playsinline muted></video><span class="camlbl">Reply code</span></div>
+    <p class="hint">Their camera opens the game. Their phone then shows a reply code &mdash; hold it up here and the match starts on its own.</p>
+    <details><summary>Camera not working?</summary>
+      <textarea id="host-code" readonly></textarea>
+      <div class="row">
+        <button class="btn ghost" id="host-copy">Copy invite</button>
+        <button class="btn gold" id="host-paste">Paste reply</button>
+      </div>
+      <textarea id="host-in" placeholder="paste their reply code here"></textarea>
+    </details>
   </div>
   <button class="btn ghost" data-back>Cancel</button>
 </section>
@@ -672,13 +684,20 @@ function iceDone(pc){
     pc.onicegatheringstatechange=function(){ if(pc.iceGatheringState==="complete"){clearTimeout(to);res()} };
   });
 }
-function qr(el,text){
+function qr(el,text,fallback){
   el.innerHTML="";
   var c=document.createElement("canvas");
   el.appendChild(c);
   QRCode.toCanvas(c,text,{errorCorrectionLevel:"L",margin:1,width:560},function(err){
-    if(err) el.innerHTML='<p style="color:#333;font-size:12px;padding:10px;text-align:center">Code is too long for a QR. Copy and paste it instead.</p>';
+    if(!err) return;
+    if(fallback&&fallback!==text) return qr(el,fallback);
+    el.innerHTML='<p style="color:#333;font-size:12px;padding:10px;text-align:center">This code is too long for a QR. Copy it and paste it on the other phone.</p>';
   });
+}
+function readCode(txt){
+  txt=(txt||"").trim();
+  var i=txt.indexOf("#j=");
+  return i>=0?txt.slice(i+3):txt;
 }
 function wireChannel(ch){
   net.ch=ch;
@@ -738,6 +757,10 @@ function applySnap(s){
 }
 
 /* host flow */
+function pageUrl(){
+  if(location.protocol==="file:") return null;
+  return location.origin+location.pathname;
+}
 async function hostFlow(){
   show("host");
   $("#host-st").textContent="Building your invite...";
@@ -748,19 +771,22 @@ async function hostFlow(){
   await net.pc.setLocalDescription(offer);
   await iceDone(net.pc);
   var code=pack({t:"o",s:sdpMin(net.pc.localDescription.sdp)});
-  $("#host-code").value=code;
-  qr($("#qrbox"),code);
-  $("#host-st").textContent="Ready. Have them scan it.";
+  var base=pageUrl();
+  var payload=base?(base+"#j="+code):code;
+  $("#host-code").value=payload;
+  qr($("#qrbox"),payload,code);
+  $("#host-st").textContent=base?"Point their camera at this.":"Open this page over Wi-Fi (not from a file) to get a one-scan link.";
+  startScan($("#hv"),function(d){ hostTake(d); });
 }
 async function hostTake(code){
-  var o=unpack(code);
+  var o=unpack(readCode(code));
   if(!o||o.t!=="a"){ $("#host-st").textContent="That is not a reply code. Try again."; return; }
   await net.pc.setRemoteDescription({type:"answer",sdp:o.s});
   $("#host-st").textContent="Connecting...";
 }
 /* join flow */
 async function joinTake(code){
-  var o=unpack(code);
+  var o=unpack(readCode(code));
   if(!o||o.t!=="o"){ $("#join-st").textContent="That is not an invite code. Try again."; return; }
   net.role="guest"; net.pc=mkPC();
   net.pc.ondatachannel=function(e){ wireChannel(e.channel); };
@@ -770,7 +796,7 @@ async function joinTake(code){
   await iceDone(net.pc);
   var rc=pack({t:"a",s:sdpMin(net.pc.localDescription.sdp)});
   stopScan();
-  $("#join-h").textContent="Step 2 - show this reply";
+  $("#join-h").textContent="Show this reply";
   $("#scanbox").style.display="none";
   $("#join-in").style.display="none";
   $("#join-use").style.display="none";
@@ -822,11 +848,7 @@ $("#b-join").onclick=function(){
   startScan($("#scanvid"),function(d){ joinTake(d); });
 };
 $("#join-use").onclick=function(){ joinTake($("#join-in").value); };
-$("#host-scan").onclick=function(){
-  $("#qrbox").innerHTML='<video id="hv" playsinline muted style="width:100%;height:100%;object-fit:cover;background:#000"></video>';
-  $("#host-st").textContent="Point the camera at their reply code.";
-  startScan($("#hv"),function(d){ hostTake(d); });
-};
+$("#host-paste").onclick=function(){ hostTake($("#host-in").value); };
 $("#host-copy").onclick=function(){ copy($("#host-code").value,$("#host-st")); };
 $("#join-copy").onclick=function(){ copy($("#join-code").value,$("#join-st")); };
 function copy(v,st){
@@ -846,6 +868,20 @@ function back(){
   if(net.pc){ try{net.pc.close()}catch(e){} net.pc=null; net.ch=null; net.open=false; }
   show("menu");
 }
+
+/* a scanned invite link lands here: join straight away */
+(function(){
+  var h=location.hash||"";
+  if(h.indexOf("#j=")!==0) return;
+  var code=h.slice(3);
+  history.replaceState(null,"",location.pathname);
+  show("join");
+  $("#join-h").textContent="Connecting...";
+  $("#scanbox").style.display="none"; $("#join-in").style.display="none";
+  $("#join-use").style.display="none";
+  $("#join-st").textContent="Building your reply...";
+  setTimeout(function(){ joinTake(code); },60);
+})();
 
 /* input polling for local player each frame (keyboard held) */
 setInterval(function(){ if(running&&mode!=="guest") applyInput(); },60);
